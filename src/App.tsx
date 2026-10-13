@@ -9,8 +9,10 @@ import {
   Verdict,
   MitmSimulationResult,
   MitmScenarioKey,
+  LiveMitmStatus,
 } from './types.js';
 import { OverviewPage } from './components/OverviewPage.js';
+import { LiveInterceptionPage } from './components/LiveInterceptionPage.js';
 import { AlertsPage } from './components/AlertsPage.js';
 import { MetersPage } from './components/MetersPage.js';
 import { AttackSimulationPage } from './components/AttackSimulationPage.js';
@@ -28,9 +30,10 @@ import {
   RefreshCw,
   Sliders,
   Radio,
+  Crosshair,
 } from 'lucide-react';
 
-const PAGES = ['Overview', 'Alerts', 'Meters', 'Attack simulation', 'Reports'] as const;
+const PAGES = ['Overview', 'Alerts', 'Meters', 'Live interception', 'Attack simulation', 'Reports'] as const;
 type PageType = (typeof PAGES)[number];
 
 export default function App() {
@@ -60,7 +63,11 @@ export default function App() {
     sim_on: true,
     auto_refresh: true,
     refresh_interval: 2,
+    live_mitm_on: true,
+    live_mitm_mode: 'auto',
+    live_mitm_rate: 0.35,
   });
+  const [liveMitm, setLiveMitm] = useState<LiveMitmStatus | null>(null);
 
   const [lastUpdated, setLastUpdated] = useState<string>(new Date().toLocaleTimeString());
 
@@ -84,12 +91,13 @@ export default function App() {
   const fetchData = useCallback(async () => {
     try {
       const sinceSec = getSecondsForRange(timeRange);
-      const [resStats, resMeters, resTel, resEvt, resSet] = await Promise.all([
+      const [resStats, resMeters, resTel, resEvt, resSet, resLm] = await Promise.all([
         fetch('/api/status').then(r => r.json()),
         fetch('/api/meters').then(r => r.json()),
         fetch(`/api/telemetry?since=${sinceSec}`).then(r => r.json()),
         fetch('/api/events?limit=1500').then(r => r.json()),
         fetch('/api/settings').then(r => r.json()),
+        fetch('/api/live-mitm').then(r => r.json()),
       ]);
 
       setStats(resStats);
@@ -97,6 +105,7 @@ export default function App() {
       setTelemetry(resTel);
       setEvents(resEvt);
       setSettings(resSet);
+      setLiveMitm(resLm);
       setLastUpdated(new Date().toLocaleTimeString());
     } catch (err) {
       console.error('Failed to fetch grid data:', err);
@@ -119,6 +128,27 @@ export default function App() {
   }, [settings.auto_refresh, settings.refresh_interval, fetchData]);
 
   // Update backend settings
+  const strikeLive = async (attack: string, meter: string | null) => {
+    await fetch('/api/live-mitm/strike', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ attack, meter }),
+    });
+    fetchData();
+  };
+  const cancelStrike = async () => {
+    await fetch('/api/live-mitm/strike', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cancel: true }),
+    });
+    fetchData();
+  };
+  const clearLiveLog = async () => {
+    await fetch('/api/live-mitm/clear', { method: 'POST' });
+    fetchData();
+  };
+
   const updateSettings = async (patch: Partial<GatewaySettings>) => {
     const updated = { ...settings, ...patch };
     setSettings(updated);
@@ -250,6 +280,7 @@ export default function App() {
                     {page === 'Overview' && <LayoutDashboard className="w-4 h-4" />}
                     {page === 'Alerts' && <ShieldAlert className="w-4 h-4" />}
                     {page === 'Meters' && <Cpu className="w-4 h-4" />}
+                    {page === 'Live interception' && <Crosshair className="w-4 h-4" />}
                     {page === 'Attack simulation' && <FlaskConical className="w-4 h-4" />}
                     {page === 'Reports' && <FileSpreadsheet className="w-4 h-4" />}
                     {page}
@@ -280,6 +311,52 @@ export default function App() {
             </label>
             <p className="text-[10px] text-[#66707d] mt-1 leading-tight">
               On: generates real-time signed telemetry for both meters.
+            </p>
+          </div>
+
+          {/* Live MITM attacker */}
+          <div className="pt-2 border-t border-[#eceef1]">
+            <div className="text-[11px] font-bold uppercase tracking-wider text-[#66707d] mb-2">
+              Live MITM Attacker
+            </div>
+            <label className="flex items-center justify-between text-xs text-[#1f2933] cursor-pointer bg-gray-50 p-2 rounded border border-[#d8dce2]/60">
+              <span className="font-medium">Attack live meters</span>
+              <input
+                type="checkbox"
+                checked={settings.live_mitm_on}
+                onChange={e => updateSettings({ live_mitm_on: e.target.checked })}
+                className="w-4 h-4 text-[#1d4ed8] rounded cursor-pointer"
+              />
+            </label>
+            <select
+              value={settings.live_mitm_mode}
+              disabled={!settings.live_mitm_on}
+              onChange={e => updateSettings({ live_mitm_mode: e.target.value })}
+              className="mt-2 w-full text-xs border border-[#d8dce2] rounded p-1.5 bg-white text-[#1f2933] disabled:opacity-50"
+            >
+              <option value="auto">Auto (rotate all attacks)</option>
+              {(liveMitm?.attacks || []).map(a => (
+                <option key={a.key} value={a.key}>{a.label}</option>
+              ))}
+            </select>
+            <div className="flex items-center justify-between text-xs text-[#1f2933] mt-2">
+              <span>Attack rate</span>
+              <span className="font-mono">{Math.round(settings.live_mitm_rate * 100)}%</span>
+            </div>
+            <input
+              type="range"
+              min="5"
+              max="100"
+              step="5"
+              value={Math.round(settings.live_mitm_rate * 100)}
+              disabled={!settings.live_mitm_on}
+              onChange={e => updateSettings({ live_mitm_rate: Number(e.target.value) / 100 })}
+              className="w-full accent-[#1d4ed8] disabled:opacity-50"
+            />
+            <p className="text-[10px] text-[#66707d] mt-1 leading-tight">
+              Tampers with, replays or forges packets from live Wokwi meters before the gateway verifies them.
+              {liveMitm ? ` Intercepted ${liveMitm.intercepted}, attacked ${liveMitm.attacked}.` : ''}
+              {liveMitm?.last ? ` Last: ${liveMitm.last.label} on ${liveMitm.last.meter_id}.` : ''}
             </p>
           </div>
 
@@ -433,6 +510,16 @@ export default function App() {
             events={events}
             onIsolate={handleIsolateMeter}
             onRestore={handleRestoreMeter}
+          />
+        )}
+
+        {activePage === 'Live interception' && (
+          <LiveInterceptionPage
+            status={liveMitm}
+            meters={meters}
+            onStrike={strikeLive}
+            onCancel={cancelStrike}
+            onClear={clearLiveLog}
           />
         )}
 

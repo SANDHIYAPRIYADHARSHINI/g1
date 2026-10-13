@@ -144,7 +144,18 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
                       {m.meter_id} · {m.site}
                     </div>
                   </div>
-                  <div>{getStatusBadge(m)}</div>
+                  <div className="flex flex-col items-end gap-1">
+                    {getStatusBadge(m)}
+                    {m.data_source === 'wokwi' ? (
+                      <span className="bg-[#1d4ed8]/10 text-[#1d4ed8] px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide">
+                        Wokwi live
+                      </span>
+                    ) : (
+                      <span className="bg-[#66707d]/10 text-[#66707d] px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide">
+                        Simulated
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* 4 Readings Grid */}

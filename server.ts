@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { GridGuardEngine } from './src/server/engine.js';
 import { tickSimulator, runAttackScenario, ATTACKS_CATALOG, runMitmSimulation } from './src/server/simulator.js';
+import { LiveMitm, LIVE_MITM_ATTACKS } from './src/server/liveMitm.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,6 +20,7 @@ if (portIdx !== -1 && process.argv[portIdx + 1]) {
   PORT = parseInt(process.env.DEFAULT_APP_PORT, 10);
 }
 const engine = new GridGuardEngine();
+const liveMitm = new LiveMitm();
 
 let simOn = true; // Default ON so meters show live data immediately
 let autoRefresh = true;
@@ -75,8 +77,54 @@ async function startServer() {
     if (!packet) {
       return res.status(400).json({ error: 'Missing packet' });
     }
+    // Live meters (via the Wokwi bridge) go through the on-path attacker first.
+    if (source === 'serial' && typeof packet === 'string') {
+      const plan = liveMitm.intercept(packet);
+      if (!plan.attack) {
+        return res.json({ ...engine.ingest(packet, source, addr), mitm: null });
+      }
+      const tag = `mitm[${plan.attack}]:${addr}`;
+      const verdicts = plan.deliver.map(raw => engine.ingest(raw, source, tag));
+      // The interesting verdict is the attacker's packet: last one delivered.
+      const v = verdicts[verdicts.length - 1];
+      liveMitm.record(plan, v);
+      return res.json({ ...v, mitm: { attack: plan.attack, label: plan.label, delivered: verdicts.length } });
+    }
     const verdict = engine.ingest(packet, source, addr);
     res.json(verdict);
+  });
+
+  app.get('/api/live-mitm', (req, res) => {
+    res.json(liveMitm.status());
+  });
+
+  // "Strike now": attack the next live packet (optionally from one meter), even if the
+  // automatic attacker is switched off.
+  app.post('/api/live-mitm/strike', (req, res) => {
+    const { attack = 'auto', meter = null, cancel = false } = req.body || {};
+    if (cancel) {
+      liveMitm.disarm();
+    } else {
+      if (attack !== 'auto' && !LIVE_MITM_ATTACKS.some(a => a.key === attack)) {
+        return res.status(400).json({ error: 'Unknown attack' });
+      }
+      liveMitm.arm(attack, meter || null);
+    }
+    res.json(liveMitm.status());
+  });
+
+  app.post('/api/live-mitm/clear', (req, res) => {
+    liveMitm.clearLog();
+    res.json(liveMitm.status());
+  });
+
+  // Used by tools/wokwi-bridge.mjs: clock, last accepted sequence and energy for a meter,
+  // so a freshly started ESP32 can continue from where the gateway expects it.
+  app.get('/api/sync/:id', (req, res) => {
+    const info = engine.getSyncInfo(req.params.id);
+    if (!info) return res.status(404).json({ error: 'Unknown meter' });
+    if (req.query.claim === '1') engine.claimLive(req.params.id);
+    res.json(info);
   });
 
   app.post('/api/attack', (req, res) => {
@@ -122,6 +170,7 @@ async function startServer() {
 
   app.post('/api/reset', (req, res) => {
     engine.reset();
+    liveMitm.reset();
     // seed initial points again
     for (let i = 0; i < 3; i++) {
       tickSimulator(engine, 0);
@@ -136,16 +185,22 @@ async function startServer() {
       sim_on: simOn,
       auto_refresh: autoRefresh,
       refresh_interval: refreshInterval,
+      live_mitm_on: liveMitm.enabled,
+      live_mitm_mode: liveMitm.mode,
+      live_mitm_rate: liveMitm.rate,
     });
   });
 
   app.post('/api/settings', (req, res) => {
-    const { auto_isolate, strict_hmac, sim_on, auto_refresh, refresh_interval } = req.body;
+    const { auto_isolate, strict_hmac, sim_on, auto_refresh, refresh_interval, live_mitm_on, live_mitm_mode, live_mitm_rate } = req.body;
     if (auto_isolate !== undefined) engine.auto_isolate = Boolean(auto_isolate);
     if (strict_hmac !== undefined) engine.strict_hmac = Boolean(strict_hmac);
     if (sim_on !== undefined) simOn = Boolean(sim_on);
     if (auto_refresh !== undefined) autoRefresh = Boolean(auto_refresh);
     if (refresh_interval !== undefined) refreshInterval = Math.max(1, Math.min(10, Number(refresh_interval)));
+    if (live_mitm_on !== undefined) liveMitm.enabled = Boolean(live_mitm_on);
+    if (live_mitm_mode !== undefined && (live_mitm_mode === 'auto' || LIVE_MITM_ATTACKS.some(a => a.key === live_mitm_mode))) liveMitm.mode = live_mitm_mode;
+    if (live_mitm_rate !== undefined) liveMitm.rate = Math.max(0.05, Math.min(1, Number(live_mitm_rate)));
 
     res.json({
       auto_isolate: engine.auto_isolate,
@@ -153,6 +208,9 @@ async function startServer() {
       sim_on: simOn,
       auto_refresh: autoRefresh,
       refresh_interval: refreshInterval,
+      live_mitm_on: liveMitm.enabled,
+      live_mitm_mode: liveMitm.mode,
+      live_mitm_rate: liveMitm.rate,
     });
   });
 

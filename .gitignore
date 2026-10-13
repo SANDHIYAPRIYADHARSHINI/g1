@@ -1,13 +1,10 @@
-# Python
 __pycache__/
 *.pyc
-
-# Virtual environment
 .venv/
-
-# Runtime data created by the app
+venv/
+node_modules/
+dist/
+.env
 logs/
 database/*.db
-
-# PlatformIO build output
 .pio/

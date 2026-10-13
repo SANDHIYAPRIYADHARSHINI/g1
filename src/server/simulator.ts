@@ -152,6 +152,8 @@ export function tickSimulator(engine: GridGuardEngine, minInterval = 1.8): Verdi
   const now = Date.now() / 1000;
   const out: Verdict[] = [];
   for (const mid of Object.keys(METERS_REGISTRY)) {
+    // A real (Wokwi) meter is sending for this ID: let it drive the data, simulator waits.
+    if (engine.isLive(mid)) continue;
     const last = engine.simLast.get(mid) || 0;
     if (now - last >= minInterval) {
       engine.simLast.set(mid, now);
@@ -940,7 +942,7 @@ export function runMitmSimulation(
 
   // Process packet through the gateway engine
   const ingestSource = 'mitm-interceptor';
-  const verdict = engine.ingest(modifiedRaw, ingestSource, `mitm:${target}`);
+  const verdict = engine.ingest(key === 'normal' ? originalRaw : modifiedRaw, ingestSource, `mitm:${target}`);
 
   const primaryDefenseFailed = primaryDefenseLayer;
 
