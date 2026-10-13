@@ -63,6 +63,7 @@ export interface MeterInfo {
   rejected: number;
   blocked: number;
   isolated_reason: string | null;
+  data_source: 'wokwi' | 'simulator';
   score: number;
   level: 'none' | 'medium' | 'high';
   latest: {
@@ -106,6 +107,40 @@ export interface GatewaySettings {
   sim_on: boolean;
   auto_refresh: boolean;
   refresh_interval: number;
+  live_mitm_on: boolean;
+  live_mitm_mode: string;
+  live_mitm_rate: number;
+}
+
+export interface LiveMitmStatus {
+  enabled: boolean;
+  mode: string;
+  rate: number;
+  intercepted: number;
+  attacked: number;
+  by_attack: Record<string, number>;
+  caught: number;
+  missed: number;
+  last: { time: string; meter_id: string; attack: string; label: string } | null;
+  pending_strike: { attack: string; meter: string | null } | null;
+  log: LiveMitmLogEntry[];
+  attacks: { key: string; label: string; summary: string; signature: string }[];
+}
+
+export interface LiveMitmLogEntry {
+  id: number;
+  time: string;
+  meter_id: string;
+  attack: string;
+  label: string;
+  summary: string;
+  signature_note: string;
+  manual: boolean;
+  original: Record<string, any>;
+  modified: Record<string, any>;
+  changed: string[];
+  delivered: number;
+  verdict: { label: string; accepted: boolean; findings: { severity: string; type: string; reason: string }[] };
 }
 
 export type MitmScenarioKey =

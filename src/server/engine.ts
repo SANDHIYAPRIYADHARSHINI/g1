@@ -54,12 +54,45 @@ function tok(v: unknown): string {
   return v === null || v === undefined ? '' : String(v);
 }
 
-export function canonical(data: Record<string, unknown>): string {
-  return SIGNED_FIELDS.map(k => tok(data[k])).join('|');
+// Pull the exact printed text of each signed field out of the raw JSON line.
+// (JSON.parse would turn "28.0" into 28 and lose the trailing zero that the meter signed.)
+function rawTokens(raw: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of SIGNED_FIELDS) {
+    const m = raw.match(new RegExp('"' + k + '"\\s*:\\s*("(?:[^"\\\\]|\\\\.)*"|[^,}\\s]+)'));
+    if (!m) continue;
+    let t = m[1];
+    if (t.startsWith('"')) {
+      try {
+        t = JSON.parse(t);
+      } catch {
+        continue;
+      }
+    }
+    out[k] = t;
+  }
+  return out;
 }
 
-export function signHmac(data: Record<string, unknown>, key: string): string {
-  const message = canonical(data);
+// A raw token is only trusted if it agrees with the value the gateway will actually use.
+// This stops a duplicate-key trick ({"current_a":1.0,...,"current_a":99}) from verifying
+// the signature over one value while the rest of the pipeline reads another.
+function tokenAgrees(token: string, parsed: unknown): boolean {
+  if (typeof parsed === 'number') return token !== '' && Number(token) === parsed;
+  return token === tok(parsed);
+}
+
+export function canonical(data: Record<string, unknown>, raw?: string): string {
+  const tokens = raw ? rawTokens(raw) : {};
+  return SIGNED_FIELDS.map(k => {
+    const t = tokens[k];
+    if (t !== undefined && data[k] !== undefined && tokenAgrees(t, data[k])) return t;
+    return tok(data[k]);
+  }).join('|');
+}
+
+export function signHmac(data: Record<string, unknown>, key: string, raw?: string): string {
+  const message = canonical(data, raw);
   return crypto.createHmac('sha256', key).update(message).digest('hex');
 }
 
@@ -94,6 +127,10 @@ export class GridGuardEngine {
   private strikesWindows: Map<string, number[]> = new Map();
   private lastRateEvent: Map<string, number> = new Map();
   public simLast: Map<string, number> = new Map();
+  // Last time a real (Wokwi / serial) packet arrived for each meter. While a meter is
+  // live, the built-in simulator steps aside for that meter and resumes when it goes quiet.
+  private liveLast: Map<string, number> = new Map();
+  public static readonly LIVE_TIMEOUT_S = 8;
 
   private nextTelemetryId = 1;
   private nextEventId = 1;
@@ -129,6 +166,7 @@ export class GridGuardEngine {
     this.strikesWindows.clear();
     this.lastRateEvent.clear();
     this.simLast.clear();
+    this.liveLast.clear();
     this.metersState.clear();
     this.nextTelemetryId = 1;
     this.nextEventId = 1;
@@ -257,6 +295,10 @@ export class GridGuardEngine {
       );
     }
 
+    if (source === 'serial') {
+      this.liveLast.set(meter_id, now);
+    }
+
     // 3. isolation check
     const m = this.metersState.get(meter_id)!;
     if (m.status === 'isolated') {
@@ -311,7 +353,7 @@ export class GridGuardEngine {
       }
       v.authenticated = false;
     } else {
-      const expected = signHmac(data, METERS_REGISTRY[meter_id].key);
+      const expected = signHmac(data, METERS_REGISTRY[meter_id].key, typeof packet === 'string' ? raw : undefined);
       const isMatch = typeof sig === 'string' && sig.toLowerCase() === expected.toLowerCase();
       if (!isMatch) {
         return this.reject(v, 'critical', 'invalid_hmac', 'HMAC signature mismatch - message altered or wrong key', source, packetAddr, now);
@@ -613,6 +655,7 @@ export class GridGuardEngine {
         rejected: m.rejected,
         blocked: m.blocked,
         isolated_reason: m.isolated_reason,
+        data_source: this.isLive(mid) ? 'wokwi' : 'simulator',
         score: scr,
         level: lvl,
         latest: latestPoint
@@ -682,6 +725,30 @@ export class GridGuardEngine {
       load_kw,
       serial_recent,
       unauthorized_recent,
+    };
+  }
+
+  // Called when an external meter announces itself, so the simulator stops for that
+  // meter immediately instead of racing the first real packet.
+  public claimLive(meter_id: string): void {
+    if (this.metersState.has(meter_id)) this.liveLast.set(meter_id, Date.now() / 1000);
+  }
+
+  public isLive(meter_id: string): boolean {
+    const t = this.liveLast.get(meter_id);
+    return t !== undefined && Date.now() / 1000 - t < GridGuardEngine.LIVE_TIMEOUT_S;
+  }
+
+  // Everything an external meter (via the Wokwi bridge) needs to line up with the gateway.
+  public getSyncInfo(meter_id: string) {
+    const m = this.metersState.get(meter_id);
+    if (!m) return null;
+    return {
+      meter_id,
+      epoch: Math.floor(Date.now() / 1000),
+      last_seq: m.last_seq || 0,
+      reported_wh: m.reported_wh ?? 0,
+      status: m.status,
     };
   }
 
